@@ -9,6 +9,20 @@ This repository contains a simple echo server example that demonstrates FastMCP 
 ### Files
 - `echo.py` - A simple MCP server that echoes back your messages
 
+## Install
+
+Install runtime dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Install dev dependencies (optional):
+
+```bash
+pip install -r requirements-dev.txt
+```
+
 ### Deployment
 
 This repository is ready to be deployed!

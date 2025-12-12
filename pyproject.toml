@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fastmcp-quickstart"
+version = "0.1.0"
+description = "FastMCP quickstart InDesign server example"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [ { name = "FastMCP Quickstart" } ]
+dependencies = [
+  "fastmcp>=0.1.0",
+  "httpx>=0.24.0",
+  "boto3>=1.26.0"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7","black>=23.0"]

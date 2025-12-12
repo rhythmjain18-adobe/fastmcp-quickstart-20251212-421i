@@ -1,0 +1,7 @@
+# Runtime dependencies for this project
+fastmcp>=0.1.0
+httpx>=0.24.0
+boto3>=1.26.0
+
+# Install dev dependencies with:
+# pip install -r requirements-dev.txt
