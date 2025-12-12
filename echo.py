@@ -7,7 +7,7 @@ from fastmcp import FastMCP
 # Create server
 mcp = FastMCP("Echo Server")
 
-api_key = os.getenv("MY_API_KEY")
+api_key = ${VAR_NAME}
 
 
 @mcp.tool
