@@ -18,14 +18,17 @@ from typing import Any
 
 import boto3
 from botocore.config import Config as BotoConfig
-from env_loader import load_env_from_file
+
+try:
+    from env_loader import load_env_from_file  # optional helper
+except Exception:
+    def load_env_from_file() -> None:
+        """No-op fallback if `env_loader` is not available."""
+        return None
 
 
 import base64
 from io import BytesIO
-
-# Load environment variables
-load_env_from_file()
 
 # Create server
 mcp = FastMCP("InDesign API Server")
