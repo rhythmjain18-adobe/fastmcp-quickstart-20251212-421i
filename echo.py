@@ -18,14 +18,13 @@ from typing import Any
 
 import boto3
 from botocore.config import Config as BotoConfig
-try:
-    from env_loader import load_env_from_file  # optional helper
-except Exception:
-    def load_env_from_file() -> None:
-        """No-op fallback if `env_loader` is not available."""
-        return None
+from env_loader import load_env_from_file
 
-# Load environment variables (if helper provided)
+
+import base64
+from io import BytesIO
+
+# Load environment variables
 load_env_from_file()
 
 # Create server
@@ -168,44 +167,62 @@ async def get_rendition_status(status_url: str) -> str:
 
 
 @mcp.tool
-async def upload_to_s3(file_path: str, expires_in: int = 3600) -> str:
+async def upload_to_s3(
+    file_content_base64: str,
+    filename: str,
+    expires_in: int = 3600,
+    content_type: str = "application/octet-stream"
+) -> str:
     """
-    Upload a local file to S3 and get a pre-signed URL.
+    Upload a base64-encoded file to S3 and get a pre-signed URL.
     
     Args:
-        file_path: Local path to the file to upload
+        file_content_base64: Base64-encoded file content
+        filename: Desired filename for S3 (e.g., 'document.indd')
         expires_in: URL expiration time in seconds (default: 3600)
+        content_type: MIME type of the file (default: application/octet-stream, use 'application/octet-stream' for .indd)
     
     Returns:
-        Pre-signed URL that can be used as source_url for create_rendition
+        JSON with presigned URL that can be used as source_url for create_rendition
     """
+    import base64
     import mimetypes
+    from io import BytesIO
     
     bucket = os.getenv("S3_BUCKET") or os.getenv("AWS_S3_BUCKET")
     if not bucket:
         return json.dumps({"error": "S3_BUCKET not configured in environment"})
     
-    if not os.path.exists(file_path):
-        return json.dumps({"error": f"File not found: {file_path}"})
-    
-    key = os.path.basename(file_path)
+    # Sanitize filename
+    key = _sanitize_filename(filename)
     region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
     
     try:
+        # Decode base64 content
+        file_bytes = base64.b64decode(file_content_base64)
+        file_obj = BytesIO(file_bytes)
+        
+        # Auto-detect content type if not provided or use from filename
+        if content_type == "application/octet-stream":
+            detected_type, _ = mimetypes.guess_type(filename)
+            if detected_type:
+                content_type = detected_type
+        
         s3 = boto3.client(
             "s3",
             region_name=region,
             config=BotoConfig(signature_version="s3v4")
         )
         
-        content_type, _ = mimetypes.guess_type(file_path)
-        extra_args = {"ContentType": content_type} if content_type else None
+        # Upload to S3
+        s3.upload_fileobj(
+            file_obj,
+            bucket,
+            key,
+            ExtraArgs={"ContentType": content_type}
+        )
         
-        if extra_args:
-            s3.upload_file(file_path, bucket, key, ExtraArgs=extra_args)
-        else:
-            s3.upload_file(file_path, bucket, key)
-        
+        # Generate presigned URL
         url = s3.generate_presigned_url(
             ClientMethod="get_object",
             Params={"Bucket": bucket, "Key": key},
@@ -217,11 +234,17 @@ async def upload_to_s3(file_path: str, expires_in: int = 3600) -> str:
             "presigned_url": url,
             "bucket": bucket,
             "key": key,
-            "expires_in": expires_in
+            "content_type": content_type,
+            "file_size_bytes": len(file_bytes),
+            "expires_in": expires_in,
+            "message": "File uploaded successfully. Use presigned_url as source_url for create_rendition"
         }, indent=2)
         
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({
+            "success": False,
+            "error": str(e)
+        })
 
 
 # ============ MCP Resources ============
@@ -272,9 +295,17 @@ Get Rendition Status:
 """,
         "upload": """
 Upload to S3:
+- file_content_base64: Base64-encoded file content (ChatGPT can provide this)
+- filename: Desired filename (e.g., 'document.indd')
 - Requires S3_BUCKET and AWS credentials in environment
 - Returns a pre-signed URL valid for the specified time
-- Use the URL as source_url for create_rendition
+- Use the presigned_url as source_url for create_rendition
+
+Example workflow:
+1. User uploads .indd file to ChatGPT
+2. ChatGPT reads file and converts to base64
+3. Call upload_to_s3 with base64 content
+4. Use returned presigned_url in create_rendition
 """
     }
     return help_topics.get(topic, f"Unknown topic: {topic}. Available: {list(help_topics.keys())}")
