@@ -12,9 +12,12 @@ Supported APIs:
 - Data Merge Tags (extract tags)
 - Remap Links (file to AEM URLs)
 - Custom Scripts (advanced automation)
+- Firefly Generate Image (AI image generation)
+- Firefly Generate Similar (AI image variations)
 
 Built with Adobe InDesign API best practices from official guides:
 https://developer.adobe.com/firefly-services/docs/indesign-apis/guides/
+https://developer.adobe.com/firefly-services/docs/firefly-api/guides/api/image_generation/V3_Async/
 
 Usage:
     fastmcp run intelligent_server.py
@@ -32,17 +35,19 @@ from typing import Any, Dict, Optional
 
 import boto3
 from botocore.config import Config as BotoConfig
-# from env_loader import load_env_from_file
+from env_loader import load_env_from_file
 
 # # Load environment variables
 # load_env_from_file()
 
-# Create server
-mcp = FastMCP("Intelligent InDesign API Server")
+# # Create server
+# mcp = FastMCP("Intelligent InDesign API Server")
 
 # API Configuration
 ADOBE_API_BASE = "https://indesign.adobe.io"
 ADOBE_API_VERSION = "v3"
+FIREFLY_API_BASE = "https://firefly-api.adobe.io"
+FIREFLY_API_VERSION = "v3"
 
 # API Limits (from Adobe Technical Usage documentation)
 # Reference: https://developer.adobe.com/firefly-services/docs/indesign-apis/getting_started/usage/
@@ -796,6 +801,335 @@ async def data_merge(
     return json.dumps(result, indent=2)
 
 
+@mcp.tool
+async def firefly_generate_image(
+    prompt: str,
+    width: int = 1024,
+    height: int = 1024,
+    num_variations: int = 1,
+    content_class: str = "photo",
+    style_presets: Optional[list[str]] = None,
+    negative_prompt: Optional[str] = None,
+    seed: Optional[int] = None,
+    wait_for_completion: bool = True
+) -> str:
+    """
+    Generate AI images using Adobe Firefly V3 API.
+    
+    Create high-quality images from text descriptions using Adobe's generative AI.
+    
+    🎨 Content Classes:
+    - 'photo': Photorealistic images
+    - 'art': Artistic/illustrated styles
+    
+    🖼️ Size Options:
+    - Square: 1024x1024 (default), 2048x2048
+    - Landscape: 1792x1024, 2304x1152, 1408x1024
+    - Portrait: 1024x1792, 1152x2304, 1024x1408
+    - Widescreen: 2688x1536
+    
+    🎭 Style Presets (optional):
+    - Photo: 'photorealistic', 'portrait', 'cinematic'
+    - Art: 'digital_art', 'fantasy_art', 'concept_art', 'line_art'
+    - Other: 'vibrant_colors', 'warm_tone', 'cool_tone', 'monochromatic'
+    
+    💡 Best Practices:
+    - Be specific and descriptive in prompts
+    - Use negative prompts to exclude unwanted elements
+    - Set seed for reproducible results
+    - Request multiple variations to explore options
+    
+    ⚠️ Rate Limits: Same as InDesign API (250 soft / 350 hard per minute)
+    
+    Reference: https://developer.adobe.com/firefly-services/docs/firefly-api/guides/api/image_generation/V3_Async/
+    
+    Args:
+        prompt: Text description of the image to generate (be descriptive)
+        width: Image width in pixels (default: 1024)
+        height: Image height in pixels (default: 1024)
+        num_variations: Number of variations to generate, 1-4 (default: 1)
+        content_class: 'photo' or 'art' (default: 'photo')
+        style_presets: Optional list of style presets to apply
+        negative_prompt: Optional text describing what to avoid in the image
+        seed: Optional seed for reproducible results (0-4294967295)
+        wait_for_completion: Wait for generation to complete (default: True)
+    
+    Returns:
+        JSON with generated image URLs and metadata
+    
+    Examples:
+        # Simple generation
+        firefly_generate_image("A serene mountain landscape at sunset")
+        
+        # With style and negative prompt
+        firefly_generate_image(
+            "Professional headshot photo",
+            style_presets=["photorealistic", "portrait"],
+            negative_prompt="blurry, low quality"
+        )
+        
+        # Multiple variations in specific size
+        firefly_generate_image(
+            "Abstract digital art with vibrant colors",
+            width=1792,
+            height=1024,
+            num_variations=4,
+            content_class="art"
+        )
+        
+        # Reproducible with seed
+        firefly_generate_image(
+            "Futuristic city skyline",
+            seed=12345,
+            style_presets=["cinematic"]
+        )
+    """
+    headers = _resolve_auth()
+    url = f"{FIREFLY_API_BASE}/{FIREFLY_API_VERSION}/images/generate"
+    
+    # Build payload
+    payload: dict[str, Any] = {
+        "prompt": prompt,
+        "numVariations": num_variations,
+        "size": {
+            "width": width,
+            "height": height
+        },
+        "contentClass": content_class
+    }
+    
+    # Add optional parameters
+    if style_presets:
+        payload["style"] = {"presets": style_presets}
+    
+    if negative_prompt:
+        payload["negativePrompt"] = negative_prompt
+    
+    if seed is not None:
+        payload["seed"] = seed
+    
+    result = await _http_request("POST", url, headers, payload)
+    
+    if not result or "error" in result:
+        return json.dumps({
+            "status": "failed",
+            "error": result.get("error", "API call failed") if result else "No response",
+            "endpoint": url,
+            "payload_used": payload
+        }, indent=2)
+    
+    # Check if this is an async response with status URL
+    status_url = result.get("statusUrl") or result.get("status_url")
+    
+    if not status_url:
+        # Synchronous response - images ready immediately
+        return json.dumps({
+            "status": "completed",
+            "result": result,
+            "prompt": prompt
+        }, indent=2)
+    
+    # Async response - poll if requested
+    if wait_for_completion:
+        final_result = await _poll_status(status_url)
+        return json.dumps({
+            "status": final_result.get("status"),
+            "result": final_result,
+            "prompt": prompt,
+            "num_variations": num_variations
+        }, indent=2)
+    else:
+        return json.dumps({
+            "status": "submitted",
+            "status_url": status_url,
+            "job_id": result.get("jobId"),
+            "prompt": prompt,
+            "message": "Job submitted. Use check_job_status to monitor progress."
+        }, indent=2)
+
+
+@mcp.tool
+async def firefly_generate_similar(
+    reference_image_url: str,
+    prompt: Optional[str] = None,
+    similarity_strength: int = 60,
+    width: int = 1024,
+    height: int = 1024,
+    num_variations: int = 1,
+    content_class: str = "photo",
+    style_presets: Optional[list[str]] = None,
+    negative_prompt: Optional[str] = None,
+    seed: Optional[int] = None,
+    wait_for_completion: bool = True
+) -> str:
+    """
+    Generate similar images based on a reference image using Adobe Firefly V3 API.
+    
+    Creates variations of an existing image while maintaining visual similarity.
+    Perfect for creating alternatives, exploring variations, or matching a style.
+    
+    🎯 Similarity Strength:
+    - 0-30: Very different, loose interpretation
+    - 31-60: Moderate similarity, noticeable variation (default: 60)
+    - 61-100: Very similar, subtle changes only
+    
+    🎨 Use Cases:
+    - Generate variations of existing designs
+    - Create multiple versions with different styles
+    - Match an existing image's composition
+    - Explore alternative color schemes or moods
+    - Create product variations
+    
+    📐 Size Options: Same as firefly_generate_image
+    - Square: 1024x1024, 2048x2048
+    - Landscape: 1792x1024, 2304x1152, 1408x1024
+    - Portrait: 1024x1792, 1152x2304, 1024x1408
+    - Widescreen: 2688x1536
+    
+    💡 Best Practices:
+    - Higher similarity_strength = closer to original
+    - Use prompts to guide specific changes
+    - Combine with style_presets for consistent aesthetic
+    - Generate multiple variations to explore options
+    
+    ⚠️ Rate Limits: Same as other Firefly APIs (250 soft / 350 hard per minute)
+    
+    Reference: https://developer.adobe.com/firefly-services/docs/firefly-api/guides/api/generate-similar/
+    
+    Args:
+        reference_image_url: Pre-signed URL to reference image (JPEG, PNG, WebP)
+        prompt: Optional text to guide variation (e.g., "make it darker", "add sunset lighting")
+        similarity_strength: How similar to reference (0-100, default: 60)
+        width: Image width in pixels (default: 1024)
+        height: Image height in pixels (default: 1024)
+        num_variations: Number of variations to generate, 1-4 (default: 1)
+        content_class: 'photo' or 'art' (default: 'photo')
+        style_presets: Optional list of style presets to apply
+        negative_prompt: Optional text describing what to avoid
+        seed: Optional seed for reproducible results (0-4294967295)
+        wait_for_completion: Wait for generation to complete (default: True)
+    
+    Returns:
+        JSON with generated image URLs and metadata
+    
+    Examples:
+        # Simple variation
+        firefly_generate_similar(
+            reference_image_url="https://s3.../product.jpg?...",
+            similarity_strength=70
+        )
+        
+        # Guided variation with prompt
+        firefly_generate_similar(
+            reference_image_url="https://s3.../landscape.jpg?...",
+            prompt="make it sunset with warm orange tones",
+            similarity_strength=50,
+            num_variations=3
+        )
+        
+        # Style transfer
+        firefly_generate_similar(
+            reference_image_url="https://s3.../photo.jpg?...",
+            similarity_strength=40,
+            content_class="art",
+            style_presets=["watercolor", "vibrant_colors"]
+        )
+        
+        # Product variations
+        firefly_generate_similar(
+            reference_image_url="https://s3.../product.jpg?...",
+            prompt="change background to white studio lighting",
+            similarity_strength=80,
+            negative_prompt="cluttered, busy"
+        )
+        
+        # Reproducible variations
+        firefly_generate_similar(
+            reference_image_url="https://s3.../design.jpg?...",
+            seed=12345,
+            similarity_strength=60,
+            num_variations=4
+        )
+    """
+    headers = _resolve_auth()
+    url = f"{FIREFLY_API_BASE}/{FIREFLY_API_VERSION}/images/generate-similar"
+    
+    # Build payload
+    payload: dict[str, Any] = {
+        "image": {
+            "source": {
+                "url": reference_image_url
+            }
+        },
+        "numVariations": num_variations,
+        "size": {
+            "width": width,
+            "height": height
+        },
+        "contentClass": content_class
+    }
+    
+    # Add similarity strength (0-100)
+    if similarity_strength is not None:
+        payload["similarityStrength"] = max(0, min(100, similarity_strength))
+    
+    # Add optional prompt
+    if prompt:
+        payload["prompt"] = prompt
+    
+    # Add optional parameters
+    if style_presets:
+        payload["style"] = {"presets": style_presets}
+    
+    if negative_prompt:
+        payload["negativePrompt"] = negative_prompt
+    
+    if seed is not None:
+        payload["seed"] = seed
+    
+    result = await _http_request("POST", url, headers, payload)
+    
+    if not result or "error" in result:
+        return json.dumps({
+            "status": "failed",
+            "error": result.get("error", "API call failed") if result else "No response",
+            "endpoint": url,
+            "payload_used": payload
+        }, indent=2)
+    
+    # Check if this is an async response with status URL
+    status_url = result.get("statusUrl") or result.get("status_url")
+    
+    if not status_url:
+        # Synchronous response - images ready immediately
+        return json.dumps({
+            "status": "completed",
+            "result": result,
+            "reference_image": reference_image_url,
+            "similarity_strength": similarity_strength
+        }, indent=2)
+    
+    # Async response - poll if requested
+    if wait_for_completion:
+        final_result = await _poll_status(status_url)
+        return json.dumps({
+            "status": final_result.get("status"),
+            "result": final_result,
+            "reference_image": reference_image_url,
+            "similarity_strength": similarity_strength,
+            "num_variations": num_variations
+        }, indent=2)
+    else:
+        return json.dumps({
+            "status": "submitted",
+            "status_url": status_url,
+            "job_id": result.get("jobId"),
+            "reference_image": reference_image_url,
+            "similarity_strength": similarity_strength,
+            "message": "Job submitted. Use check_job_status to monitor progress."
+        }, indent=2)
+
+
 # ============ RAG Helper Tools ============
 
 @mcp.tool
@@ -848,7 +1182,9 @@ def system_status() -> str:
             "Document Info (fonts, links, pages)",
             "Data Merge (template + CSV)",
             "Data Merge Tags (extract tags)",
-            "Remap Links (file to AEM)"
+            "Remap Links (file to AEM)",
+            "Firefly Generate Image (AI image generation)",
+            "Firefly Generate Similar (AI image variations)"
         ]
     }, indent=2)
 
@@ -1490,6 +1826,303 @@ def logging_guide() -> str:
     }, indent=2)
 
 
+@mcp.resource("indesign://guides/firefly")
+def firefly_guide() -> str:
+    """
+    Best practices for working with the Firefly Generate Image API.
+    
+    Reference: https://developer.adobe.com/firefly-services/docs/firefly-api/guides/api/image_generation/V3_Async/
+    """
+    return json.dumps({
+        "overview": "Generate AI images from text descriptions using Adobe Firefly V3",
+        "api_details": {
+            "endpoint": "https://firefly-api.adobe.io/v3/images/generate",
+            "method": "POST",
+            "authentication": "Same as InDesign API (Bearer token + x-api-key)",
+            "async_mode": "Polls status URL for completion"
+        },
+        "content_classes": {
+            "photo": {
+                "description": "Photorealistic images",
+                "use_cases": ["Product photos", "Portraits", "Landscapes", "Marketing materials"],
+                "best_for": "Realistic imagery that looks like photographs"
+            },
+            "art": {
+                "description": "Artistic and illustrated styles",
+                "use_cases": ["Concept art", "Illustrations", "Fantasy scenes", "Abstract designs"],
+                "best_for": "Creative, stylized, or non-photographic content"
+            }
+        },
+        "supported_sizes": {
+            "square": [
+                {"width": 1024, "height": 1024, "description": "Standard square"},
+                {"width": 2048, "height": 2048, "description": "High-res square"}
+            ],
+            "landscape": [
+                {"width": 1792, "height": 1024, "description": "Wide landscape"},
+                {"width": 2304, "height": 1152, "description": "Ultra-wide landscape"},
+                {"width": 1408, "height": 1024, "description": "Standard landscape"}
+            ],
+            "portrait": [
+                {"width": 1024, "height": 1792, "description": "Tall portrait"},
+                {"width": 1152, "height": 2304, "description": "Ultra-tall portrait"},
+                {"width": 1024, "height": 1408, "description": "Standard portrait"}
+            ],
+            "widescreen": [
+                {"width": 2688, "height": 1536, "description": "Cinematic widescreen"}
+            ]
+        },
+        "style_presets": {
+            "photorealistic": ["photorealistic", "portrait", "cinematic", "macro", "landscape"],
+            "artistic": ["digital_art", "fantasy_art", "concept_art", "line_art", "watercolor", "oil_painting"],
+            "tone": ["vibrant_colors", "warm_tone", "cool_tone", "monochromatic", "pastel"],
+            "lighting": ["golden_hour", "studio_lighting", "dramatic_lighting", "soft_lighting"],
+            "note": "Can combine multiple presets for unique styles"
+        },
+        "prompt_engineering": {
+            "best_practices": [
+                "Be specific and descriptive",
+                "Include details about subject, setting, lighting, mood",
+                "Mention desired style or artistic reference",
+                "Specify camera angle or perspective if relevant",
+                "Use adjectives to convey quality (crisp, vibrant, detailed)"
+            ],
+            "good_examples": [
+                "A professional headshot of a business executive, studio lighting, neutral background, 50mm lens",
+                "Serene mountain landscape at golden hour, snow-capped peaks, pine trees, dramatic clouds",
+                "Futuristic city skyline at night, neon lights, cyberpunk aesthetic, cinematic composition",
+                "Watercolor illustration of a cozy coffee shop, warm colors, hand-drawn style"
+            ],
+            "avoid": [
+                "Vague prompts like 'nice picture'",
+                "Contradictory instructions",
+                "Too many unrelated concepts in one prompt"
+            ]
+        },
+        "negative_prompts": {
+            "purpose": "Specify what you DON'T want in the image",
+            "common_excludes": [
+                "blurry, low quality, pixelated",
+                "distorted, deformed",
+                "watermark, text, logo",
+                "oversaturated, underexposed",
+                "cluttered, busy background"
+            ],
+            "example": {
+                "prompt": "Professional product photo of a watch",
+                "negative_prompt": "blurry, low quality, cluttered background, watermark"
+            }
+        },
+        "seed_parameter": {
+            "purpose": "Generate reproducible results",
+            "range": "0 to 4294967295",
+            "use_cases": [
+                "A/B testing different prompts with same composition",
+                "Iterating on a successful generation",
+                "Ensuring consistency across a series",
+                "Debugging prompt changes"
+            ],
+            "note": "Same seed + prompt = same image (approximately)"
+        },
+        "num_variations": {
+            "range": "1 to 4",
+            "recommendation": "Generate 3-4 variations to explore options",
+            "use_cases": [
+                "Exploring different compositions",
+                "Finding the best interpretation",
+                "Presenting options to clients"
+            ],
+            "cost_note": "Each variation counts toward rate limits"
+        },
+        "workflow_integration": {
+            "standalone": "Generate images for any creative project",
+            "with_indesign": {
+                "step_1": "Generate image with Firefly",
+                "step_2": "Download generated image",
+                "step_3": "Upload to S3 using upload_file_and_presign",
+                "step_4": "Use in InDesign data merge or as asset",
+                "example_use_cases": [
+                    "Generate product mockups for catalog",
+                    "Create background images for templates",
+                    "Generate personalized images for mail merge"
+                ]
+            }
+        },
+        "rate_limits": {
+            "same_as_indesign": "250 soft / 350 hard requests per minute",
+            "considerations": [
+                "Each variation counts as part of the same request",
+                "Polling status doesn't count toward limits",
+                "Plan batch generations accordingly"
+            ]
+        },
+        "output_format": {
+            "format": "JPEG",
+            "quality": "High quality suitable for print and web",
+            "storage": "Temporary URLs in response (12h retention)",
+            "recommendation": "Download and store in your own S3/storage immediately"
+        },
+        "common_use_cases": {
+            "marketing": [
+                "Social media graphics",
+                "Blog post headers",
+                "Email campaign visuals",
+                "Ad creatives"
+            ],
+            "design": [
+                "Concept visualization",
+                "Mood boards",
+                "Background textures",
+                "UI placeholders"
+            ],
+            "content_creation": [
+                "Article illustrations",
+                "Story visualizations",
+                "Character designs",
+                "Scene concepts"
+            ],
+            "personalization": [
+                "Generate unique images per customer",
+                "Dynamic product visualizations",
+                "Customized backgrounds"
+            ]
+        },
+        "tips": [
+            "Start with simple prompts, then add details incrementally",
+            "Use style presets to achieve consistent aesthetic",
+            "Generate multiple variations to explore options",
+            "Save successful seeds for reproducibility",
+            "Combine with InDesign tools for complete workflows",
+            "Use negative prompts to avoid common issues",
+            "Choose appropriate size for your use case",
+            "Download and store images immediately (12h retention)"
+        ],
+        "example_scenarios": {
+            "product_marketing": {
+                "prompt": "Professional product photo of a smartwatch on a wooden desk, natural lighting, minimalist aesthetic, shallow depth of field",
+                "width": 1792,
+                "height": 1024,
+                "content_class": "photo",
+                "style_presets": ["photorealistic", "studio_lighting"],
+                "num_variations": 3
+            },
+            "fantasy_illustration": {
+                "prompt": "Magical forest with glowing mushrooms and fireflies, mystical atmosphere, vibrant colors, fantasy art style",
+                "width": 1024,
+                "height": 1792,
+                "content_class": "art",
+                "style_presets": ["fantasy_art", "vibrant_colors"],
+                "negative_prompt": "realistic, photo, dark, gloomy"
+            },
+            "corporate_headshot": {
+                "prompt": "Professional business portrait, neutral gray background, soft studio lighting, confident expression",
+                "width": 1024,
+                "height": 1024,
+                "content_class": "photo",
+                "style_presets": ["portrait", "studio_lighting"],
+                "seed": 12345
+            }
+        },
+        "generate_similar_api": {
+            "overview": "Generate variations of existing images while maintaining visual similarity",
+            "endpoint": "https://firefly-api.adobe.io/v3/images/generate-similar",
+            "use_cases": [
+                "Create product variations (different colors, backgrounds)",
+                "Explore alternative compositions",
+                "Style transfer (convert photo to art style)",
+                "Match existing brand aesthetics",
+                "Generate A/B test variations",
+                "Create themed variations (seasonal, mood-based)"
+            ],
+            "similarity_strength": {
+                "range": "0-100",
+                "guide": {
+                    "0-30": "Very different - loose interpretation, major changes",
+                    "31-60": "Moderate similarity - noticeable variations (default: 60)",
+                    "61-100": "Very similar - subtle changes only, close to original"
+                },
+                "tips": [
+                    "Start at 60 and adjust based on results",
+                    "Higher values = closer to reference image",
+                    "Lower values = more creative freedom",
+                    "Combine with prompts for directed changes"
+                ]
+            },
+            "workflow": {
+                "step_1": "Have an existing image (reference)",
+                "step_2": "Upload to S3 using upload_file_and_presign",
+                "step_3": "Call firefly_generate_similar with reference URL",
+                "step_4": "Optionally add prompt to guide changes",
+                "step_5": "Generate 3-4 variations to explore options"
+            },
+            "prompt_with_reference": {
+                "purpose": "Guide how the variation should differ from reference",
+                "examples": [
+                    "make it sunset with warm orange tones",
+                    "change background to white studio",
+                    "add dramatic lighting",
+                    "convert to watercolor art style",
+                    "make it darker and more moody",
+                    "add winter snow theme"
+                ],
+                "tip": "Prompts are optional but help direct specific changes"
+            },
+            "example_scenarios": {
+                "product_variation": {
+                    "reference_image": "original_product.jpg",
+                    "prompt": "change background to white studio lighting",
+                    "similarity_strength": 80,
+                    "use_case": "Create clean product shots from lifestyle photos"
+                },
+                "style_transfer": {
+                    "reference_image": "photo.jpg",
+                    "prompt": None,
+                    "similarity_strength": 40,
+                    "content_class": "art",
+                    "style_presets": ["watercolor", "vibrant_colors"],
+                    "use_case": "Convert realistic photo to artistic style"
+                },
+                "seasonal_variations": {
+                    "reference_image": "landscape.jpg",
+                    "prompt": "add autumn colors with red and orange leaves",
+                    "similarity_strength": 70,
+                    "num_variations": 4,
+                    "use_case": "Create seasonal marketing materials"
+                },
+                "ab_testing": {
+                    "reference_image": "ad_design.jpg",
+                    "similarity_strength": 75,
+                    "num_variations": 4,
+                    "seed": 12345,
+                    "use_case": "Generate consistent variations for A/B testing"
+                }
+            },
+            "best_practices": [
+                "Use high-quality reference images for best results",
+                "Start with similarity_strength=60 and adjust",
+                "Generate multiple variations (3-4) to explore options",
+                "Combine prompts with style_presets for directed changes",
+                "Use seeds for reproducible variations",
+                "Download reference image first if not already on S3"
+            ],
+            "comparison_with_generate": {
+                "generate_image": {
+                    "input": "Text prompt only",
+                    "output": "Brand new image from description",
+                    "control": "Via detailed prompts and style presets",
+                    "best_for": "Creating from scratch, no reference available"
+                },
+                "generate_similar": {
+                    "input": "Reference image + optional prompt",
+                    "output": "Variation maintaining composition/structure",
+                    "control": "Via similarity_strength and prompt",
+                    "best_for": "Creating variations, matching existing style"
+                }
+            }
+        }
+    }, indent=2)
+
+
 @mcp.resource("indesign://examples")
 def get_examples() -> str:
     """Get usage examples for all available tools."""
@@ -1512,6 +2145,32 @@ def get_examples() -> str:
                 "usage": "intelligent_indesign_api('Merge template with CSV', template_url, {'csv': csv_url})"
             }
         ],
+        "firefly_examples": [
+            {
+                "description": "Simple image generation",
+                "usage": "firefly_generate_image('A serene mountain landscape at sunset')"
+            },
+            {
+                "description": "Photorealistic with specific size",
+                "usage": "firefly_generate_image('Professional headshot photo', width=1024, height=1024, style_presets=['photorealistic', 'portrait'])"
+            },
+            {
+                "description": "Multiple variations",
+                "usage": "firefly_generate_image('Futuristic city skyline', num_variations=4, content_class='art')"
+            },
+            {
+                "description": "With negative prompt and seed",
+                "usage": "firefly_generate_image('Cozy coffee shop interior', negative_prompt='blurry, crowded', seed=12345)"
+            },
+            {
+                "description": "Generate similar images from reference",
+                "usage": "firefly_generate_similar('https://s3.../photo.jpg', prompt='make it sunset', similarity_strength=60, num_variations=3)"
+            },
+            {
+                "description": "Style transfer with high similarity",
+                "usage": "firefly_generate_similar('https://s3.../product.jpg', similarity_strength=80, style_presets=['watercolor'])"
+            }
+        ],
         "dedicated_tools": [
             {
                 "name": "get_data_merge_tags",
@@ -1532,6 +2191,16 @@ def get_examples() -> str:
                 "name": "get_document_info_direct",
                 "description": "Get fonts, links, and pages from document",
                 "usage": "get_document_info_direct(source_url)"
+            },
+            {
+                "name": "firefly_generate_image",
+                "description": "Generate AI images from text prompts using Firefly",
+                "usage": "firefly_generate_image('A serene mountain landscape at sunset')"
+            },
+            {
+                "name": "firefly_generate_similar",
+                "description": "Generate variations of an existing image",
+                "usage": "firefly_generate_similar('https://s3.../image.jpg?...', similarity_strength=70)"
             }
         ],
         "workflow": [
@@ -1545,6 +2214,7 @@ def get_examples() -> str:
             "asset_paths_guide": "indesign://guides/asset-paths - Input/output path management",
             "rendition_guide": "indesign://guides/rendition",
             "data_merge_guide": "indesign://guides/data-merge",
+            "firefly_guide": "indesign://guides/firefly - AI image generation",
             "logging_guide": "indesign://guides/logging",
             "system_status": "indesign://status"
         },
@@ -1593,6 +2263,36 @@ This will:
 1. Show you all data merge placeholders in the template
 2. Merge the CSV data to create one output per row
 3. Return download URLs for all merged documents"""
+
+
+@mcp.prompt("generate_ai_image")
+def generate_ai_image_prompt(description: str, style: str = "photorealistic") -> str:
+    """Generate AI images using Firefly with smart defaults."""
+    return f"""Generate an AI image using Adobe Firefly:
+
+Description: {description}
+Style: {style}
+
+Call:
+firefly_generate_image(
+    "{description}",
+    num_variations=3,
+    style_presets=["{style}"]
+)
+
+Tips for better results:
+- Be specific about subject, lighting, mood, and composition
+- Use style_presets: 'photorealistic', 'portrait', 'cinematic', 'digital_art', 'fantasy_art'
+- Add negative_prompt to exclude unwanted elements
+- Set seed for reproducible results
+- Choose appropriate size for your use case (1024x1024 default)
+
+The tool will:
+1. Generate 3 variations of your image
+2. Return download URLs for all variations
+3. Images are high-quality suitable for print and web
+
+See indesign://guides/firefly for comprehensive guide."""
 
 
 if __name__ == "__main__":
