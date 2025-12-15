@@ -35,13 +35,13 @@ from typing import Any, Dict, Optional
 
 import boto3
 from botocore.config import Config as BotoConfig
-from env_loader import load_env_from_file
+# from env_loader import load_env_from_file
 
 # # Load environment variables
 # load_env_from_file()
 
-# # Create server
-# mcp = FastMCP("Intelligent InDesign API Server")
+# Create server
+mcp = FastMCP("Intelligent InDesign API Server")
 
 # API Configuration
 ADOBE_API_BASE = "https://indesign.adobe.io"
